@@ -1,0 +1,121 @@
+name: CI
+
+# Guards the measurement apparatus, not the measurements themselves. Benchmarks
+# are not run here: a shared CI runner has noisy neighbours and no fixed CPU
+# budget, so any number it produced would describe the runner. What CI can do is
+# make sure the thing that produces numbers is not broken.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  static-analysis:
+    name: PHPStan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Both adapter analysis and Pint need these installed; the images build
+      # their own copies from the same committed lock files.
+      - name: Install dependencies for analysis
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work/laravel composer:2 \
+            install --no-interaction --no-scripts --no-progress
+          docker run --rm -v "$PWD:/work" -w /work/docker/roadrunner composer:2 \
+            install --no-interaction --no-scripts --no-progress
+
+      - name: Shared library (level 8)
+        run: |
+          docker run --rm -v "$PWD:/app:ro" -w /app ghcr.io/phpstan/phpstan:latest \
+            analyse --no-progress
+
+      # The per-runtime adapters are the only code that differs between
+      # runtimes, which makes them the place where a defect skews a comparison
+      # without failing anything.
+      - name: Runtime adapters
+        run: |
+          docker run --rm -v "$PWD:/app:ro" -w /app ghcr.io/phpstan/phpstan:latest \
+            analyse -c phpstan-adapters.neon --no-progress
+
+  formatting:
+    name: Pint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Laravel dependencies
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work/laravel composer:2 \
+            install --no-interaction --no-scripts --no-progress
+
+      - name: Check formatting
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work php:8.3-cli-alpine \
+            php laravel/vendor/bin/pint --test
+
+  smoke-test:
+    name: Smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the shared application's test suite
+        run: docker compose --profile test run --rm test
+
+  build:
+    name: Build images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A build failure is the most common way this project breaks, and every
+      # one so far was silent until an image was actually built: a missing
+      # Swoole build dependency, a lock resolved for the wrong PHP version, an
+      # Octane extension that was never installed.
+      - name: Build every runtime image
+        run: docker compose --profile all build
+
+  routes:
+    name: Routes answer on every runtime
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start every runtime
+        run: |
+          cp .env.example .env
+          docker compose --profile all up -d --build
+
+      # Verifies wiring, not performance: each runtime must answer every route
+      # declared in routes.json, and answer 404 for anything else. This is what
+      # catches an adapter that starts but never routes — FrankenPHP's worker
+      # mode did exactly that, serving the classic entrypoint while looking
+      # healthy.
+      - name: Check every route on every runtime
+        run: |
+          set -eu
+          failed=0
+          while IFS='=' read -r runtime service; do
+            case "$runtime" in ''|\#*) continue ;; esac
+            # Entries carry taxonomy fields after the service name.
+            service="${service%%|*}"
+            port="$(docker compose --profile all port "$service" 8080 | tail -1 | sed 's/.*://')"
+            for path in $(grep -oE '"path": "[^"]+"' routes.json | sed 's/.*"path": "//;s/"//'); do
+              status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "http://localhost:${port}${path}")"
+              if [ "$status" != "200" ]; then
+                echo "FAIL ${runtime} ${path} -> ${status}"
+                failed=1
+              fi
+            done
+            status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "http://localhost:${port}/does-not-exist")"
+            if [ "$status" != "404" ]; then
+              echo "FAIL ${runtime} unknown path -> ${status} (expected 404)"
+              failed=1
+            fi
+          done < benchmarks/runtimes.conf
+          exit "$failed"
+
+      - name: Tear down
+        if: always()
+        run: docker compose --profile all down
