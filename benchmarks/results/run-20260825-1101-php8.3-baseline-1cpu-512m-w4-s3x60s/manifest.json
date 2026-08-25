@@ -1,0 +1,40 @@
+{
+    "run_id": "run-20260825-1101-php8.3-baseline-1cpu-512m-w4-s3x60s",
+    "started_at": "2026-08-25T14:01:21Z",
+    "runtimes": [
+        "fpm",
+        "swoole",
+        "roadrunner",
+        "laravel-fpm",
+        "laravel-octane-swoole",
+        "laravel-octane-roadrunner",
+        "frankenphp",
+        "frankenphp-worker"
+    ],
+    "budget": {
+        "app_cpus": "1.0",
+        "app_mem": "512m",
+        "app_workers": 4,
+        "app_max_requests_per_worker": 0,
+        "nginx_cpus": "2.0",
+        "k6_cpus": "5.0"
+    },
+    "load": {
+        "samples_per_route": 3,
+        "measure_seconds": 60,
+        "warmup_seconds": 5,
+        "overload_vus": 200,
+        "latency_budget_p95_ms": 200
+    },
+    "php_tuning": "baseline",
+    "php_version": "8.3",
+    "host": {
+        "docker_version": "29.2.0",
+        "os": "Docker Desktop",
+        "kernel": "6.6.87.2-microsoft-standard-WSL2",
+        "cpus": 12,
+        "memory_bytes": 8297598976
+    },
+    "finished_at": "2026-08-25T16:35:38Z",
+    "duration_seconds": 9257
+}
