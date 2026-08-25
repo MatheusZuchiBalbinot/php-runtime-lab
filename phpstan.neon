@@ -1,0 +1,24 @@
+parameters:
+    level: 8
+    paths:
+        - app
+        - tests
+        - benchmarks/scripts
+
+    # Cache goes to /tmp so the repository can be mounted read-only.
+    tmpDir: /tmp/phpstan
+
+    # The app has no Composer autoloader of its own (that is the point: FPM and
+    # Swoole run it with nothing but the bundled bootstrap), so PHPStan is
+    # pointed at the same autoloader the runtimes use.
+    bootstrapFiles:
+        - app/src/bootstrap.php
+    scanDirectories:
+        - app/src
+
+    # The runtime adapters under docker/ are deliberately out of scope: each
+    # one imports vendor classes (Swoole\*, Spiral\*) that only exist inside
+    # its own image, so analysing them here would report missing classes rather
+    # than real defects.
+    excludePaths:
+        - docker

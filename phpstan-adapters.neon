@@ -1,0 +1,71 @@
+# Static analysis for the per-runtime adapters, Laravel's framework glue, and
+# the OPcache preload script.
+#
+# Kept separate from phpstan.neon because these files depend on code that
+# exists in only one deployment image each — the Swoole extension, FrankenPHP's
+# built-in function, Laravel's framework and its Composer install. The main
+# configuration analyses the shared library, which every deployment loads
+# identically and which therefore has no such dependency.
+#
+# This is the only code in the project that differs between deployments —
+# everything else here is the shared library every adapter dispatches into.
+# A defect in one of these files silently biases whichever deployment it lives
+# in, and nothing but a benchmark run would ever exercise the difference, so
+# nothing else would catch it either.
+parameters:
+    # Matches the shared library's level 8. Reaching it required no relaxation:
+    # the stubs under phpstan/stubs declare the exact signatures the real
+    # Swoole and FrankenPHP extensions expose (checked against swoole-src's
+    # arginfo headers and FrankenPHP's documented worker contract), so nothing
+    # here is checked more leniently than app/src.
+    level: 8
+
+    paths:
+        - docker/swoole/server.php
+        - docker/roadrunner/worker.php
+        - docker/frankenphp/public/index.php
+        - app/public/index.php
+        - laravel/app
+        - laravel/bootstrap
+        - laravel/config
+        - laravel/routes
+        - laravel/public/index.php
+        # OPcache preload script (docker/shared/tuning/preload.ini activates it
+        # for PHP_TUNING=preload): per-deployment code with the same "only a
+        # benchmark run exercises it" risk as the adapters above, so it belongs
+        # in this config rather than falling through uncovered.
+        - preload.php
+
+    tmpDir: /tmp/phpstan-adapters
+
+    bootstrapFiles:
+        - app/src/bootstrap.php
+
+    scanDirectories:
+        - app/src
+        # RoadRunner's PSR-7 worker and Laravel's framework are real packages;
+        # only Swoole and FrankenPHP need stubbing.
+        - laravel/vendor
+        - docker/roadrunner/vendor
+
+    stubFiles:
+        - phpstan/stubs/swoole.stub.php
+        - phpstan/stubs/frankenphp.stub.php
+
+    # The adapters are entrypoint scripts, not libraries: they run top-level
+    # code by design, and every one of them ends in an infinite serve loop.
+    treatPhpDocTypesAsCertain: false
+
+    ignoreErrors:
+        -
+            # Laravel's ClosureCommand rebinds this closure to itself before
+            # calling it, so $this resolves at runtime to the command instance
+            # — a framework mechanism vanilla PHPStan cannot see without the
+            # Larastan extension, which this project does not install. The
+            # file is stock Laravel scaffolding (`php artisan` generates it
+            # verbatim), not lab code, so working around the false positive by
+            # rewriting the closure would fight the framework's own convention
+            # for no benefit.
+            message: '#^Undefined variable: \$this$#'
+            path: laravel/routes/console.php
+            count: 1

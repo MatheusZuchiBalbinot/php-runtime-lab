@@ -1,0 +1,8 @@
+# Shell scripts must keep LF endings even when checked out on Windows: a
+# script with CRLF line endings has "\r" glued to its shebang path, and the
+# Linux kernel then fails to find the interpreter ("no such file or
+# directory") when the container starts.
+*.sh text eol=lf
+
+# PowerShell scripts are the mirror case — they stay CRLF.
+*.ps1 text eol=crlf

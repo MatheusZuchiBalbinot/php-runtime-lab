@@ -1,0 +1,17 @@
+# Everything here is sent to the Docker daemon on every build, so keep out
+# what no image ever copies. The results directory matters most: it grows a
+# JSON file per benchmark run, and without this every run would make the next
+# build slower.
+.git/
+.gitattributes
+.gitignore
+.claude/
+benchmarks/results/
+vendor/
+.env
+*.md
+
+# Anchored to the repository root on purpose: docker/roadrunner/composer.lock
+# is what makes that image's dependency set reproducible and MUST reach the
+# build context. An unanchored "composer.lock" would quietly exclude it.
+/composer.lock
