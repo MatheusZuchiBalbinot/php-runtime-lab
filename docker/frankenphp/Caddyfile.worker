@@ -1,0 +1,38 @@
+# FrankenPHP in worker mode: the PHP script boots once and then loops,
+# handling requests without re-bootstrapping — the same model as Swoole and
+# RoadRunner, but on the same server binary as the classic profile, which is
+# what lets the two be compared without also changing the server.
+{
+	auto_https off
+	admin off
+
+	servers {
+		# Pinned to HTTP/1.1 for the same reason as the classic profile: the
+		# other runtimes answer k6 over HTTP/1.1, and comparing throughput
+		# across protocols would measure the protocol.
+		protocols h1
+	}
+
+	frankenphp {
+		# The worker count is the shared budget, so this runtime serves
+		# requests with exactly as many PHP workers as every other one.
+		#
+		# num_threads is deliberately one higher: FrankenPHP refuses to start
+		# unless the pool is larger than the worker threads drawn from it
+		# ("num_threads must be greater than the number of worker threads").
+		# The spare thread is a structural requirement of this server, not
+		# extra request-serving capacity — the quantity being held equal
+		# across the lab is the worker count, which stays at APP_WORKERS.
+		num_threads {$APP_THREADS:5}
+
+		worker {
+			file /var/www/html/frankenphp-public/index.php
+			num {$APP_WORKERS:4}
+		}
+	}
+}
+
+:8080 {
+	root * /var/www/html/frankenphp-public
+	php_server
+}

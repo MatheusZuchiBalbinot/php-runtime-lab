@@ -1,0 +1,21 @@
+version: "3"
+
+server:
+  command: "php worker.php"
+
+http:
+  address: 0.0.0.0:8080
+  pool:
+    # APP_WORKERS is the shared worker budget every runtime in the lab runs
+    # with, derived from the CPU budget. Never left unset: RoadRunner's own
+    # default is the detected CPU count, which inside a container means the
+    # host's cores, not the cgroup quota.
+    num_workers: ${APP_WORKERS}
+    # Equalised with every other runtime: recycling costs a full bootstrap, so
+    # an uneven policy credits that cost to the execution model instead of to
+    # the policy. Never left at RoadRunner's own default for the same reason.
+    max_jobs: ${APP_MAX_REQUESTS}
+
+logs:
+  mode: production
+  level: warn

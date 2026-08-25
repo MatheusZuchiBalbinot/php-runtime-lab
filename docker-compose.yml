@@ -1,0 +1,327 @@
+services:
+  app-fpm:
+    profiles: ["fpm", "all"]
+    build:
+      context: .
+      dockerfile: docker/fpm/Dockerfile
+      args:
+        PHP_VERSION: ${PHP_VERSION:-8.3}
+    environment:
+      APP_WORKERS: ${APP_WORKERS:-4}
+      APP_MAX_REQUESTS: ${APP_MAX_REQUESTS:-500}
+      EXTERNAL_IO_URL: ${EXTERNAL_IO_URL:-http://stub:8080/}
+    volumes:
+      # Tuning profile (baseline | jit | preload), mounted rather than baked in
+      # so a variant can be measured without rebuilding the image.
+      # Loaded after zz-app.ini, so it overrides the shared baseline.
+      - ./docker/shared/tuning/${PHP_TUNING:-baseline}.ini:/usr/local/etc/php/conf.d/zzz-tuning.ini:ro
+      - ./preload.php:/var/www/html/preload.php:ro
+    cpus: ${APP_CPUS:-1.0}
+    mem_limit: ${APP_MEM:-512m}
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9000"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  nginx:
+    profiles: ["fpm", "all"]
+    image: nginx:1.27-alpine
+    # Makes nginx size its worker pool from the container's CPU quota instead
+    # of from "auto", which counts the HOST's cores -- `cpus:` is a CFS quota,
+    # not a cpuset. Without this, a 2 CPU budget is served by as many worker
+    # processes as the host has cores, each with its own connection pool.
+    #
+    # This is the official image's own mechanism (an entrypoint script that
+    # reads the cgroup quota), rather than a -g override: worker_processes
+    # demands an integer, and the budget is expressed as a float.
+    environment:
+      NGINX_ENTRYPOINT_WORKER_PROCESSES_AUTOTUNE: "1"
+    depends_on:
+      app-fpm:
+        condition: service_healthy
+    volumes:
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./app/public:/var/www/html/app/public:ro
+    ports:
+      - "${FPM_PORT:-8081}:8080"
+    cpus: ${NGINX_CPUS:-2.0}
+    mem_limit: ${NGINX_MEM:-64m}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  app-swoole:
+    profiles: ["swoole", "all"]
+    build:
+      context: .
+      dockerfile: docker/swoole/Dockerfile
+      args:
+        PHP_VERSION: ${PHP_VERSION:-8.3}
+    environment:
+      APP_WORKERS: ${APP_WORKERS:-4}
+      APP_MAX_REQUESTS: ${APP_MAX_REQUESTS:-500}
+      EXTERNAL_IO_URL: ${EXTERNAL_IO_URL:-http://stub:8080/}
+    volumes:
+      - ./docker/shared/tuning/${PHP_TUNING:-baseline}.ini:/usr/local/etc/php/conf.d/zzz-tuning.ini:ro
+      - ./preload.php:/var/www/html/preload.php:ro
+    ports:
+      - "${SWOOLE_PORT:-8082}:8080"
+    cpus: ${APP_CPUS:-1.0}
+    mem_limit: ${APP_MEM:-512m}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  app-roadrunner:
+    profiles: ["roadrunner", "all"]
+    build:
+      context: .
+      dockerfile: docker/roadrunner/Dockerfile
+      args:
+        PHP_VERSION: ${PHP_VERSION:-8.3}
+    environment:
+      APP_WORKERS: ${APP_WORKERS:-4}
+      APP_MAX_REQUESTS: ${APP_MAX_REQUESTS:-500}
+      EXTERNAL_IO_URL: ${EXTERNAL_IO_URL:-http://stub:8080/}
+    volumes:
+      - ./docker/shared/tuning/${PHP_TUNING:-baseline}.ini:/usr/local/etc/php/conf.d/zzz-tuning.ini:ro
+      - ./preload.php:/var/www/html/preload.php:ro
+    ports:
+      - "${ROADRUNNER_PORT:-8083}:8080"
+    cpus: ${APP_CPUS:-1.0}
+    mem_limit: ${APP_MEM:-512m}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # The same handlers, served through a real Laravel application. Budgets are
+  # identical to the vanilla services, so the difference measured against them
+  # is the framework's cost, not a different resource allowance.
+  # ---------------------------------------------------------------------------
+
+  app-laravel-fpm:
+    profiles: ["laravel-fpm", "laravel", "all"]
+    build:
+      context: .
+      dockerfile: docker/laravel-fpm/Dockerfile
+    environment:
+      APP_WORKERS: ${APP_WORKERS:-4}
+      APP_MAX_REQUESTS: ${APP_MAX_REQUESTS:-500}
+      EXTERNAL_IO_URL: ${EXTERNAL_IO_URL:-http://stub:8080/}
+      BENCHMARK_RUNTIME: laravel-fpm
+      APP_ENV: production
+      APP_DEBUG: "false"
+      APP_KEY: ${LARAVEL_APP_KEY:-base64:Zm9vYmFyYmF6cXV4Zm9vYmFyYmF6cXV4MTIzNDU2Nzg=}
+      LOG_CHANNEL: stderr
+      SESSION_DRIVER: array
+      CACHE_STORE: array
+      QUEUE_CONNECTION: sync
+    volumes:
+      - ./docker/shared/tuning/${PHP_TUNING:-baseline}.ini:/usr/local/etc/php/conf.d/zzz-tuning.ini:ro
+    cpus: ${APP_CPUS:-1.0}
+    mem_limit: ${APP_MEM:-512m}
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9000"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  nginx-laravel:
+    profiles: ["laravel-fpm", "laravel", "all"]
+    image: nginx:1.27-alpine
+    # See the nginx service above.
+    environment:
+      NGINX_ENTRYPOINT_WORKER_PROCESSES_AUTOTUNE: "1"
+    depends_on:
+      app-laravel-fpm:
+        condition: service_healthy
+    volumes:
+      - ./docker/nginx/laravel.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./laravel/public:/var/www/html/laravel/public:ro
+    ports:
+      - "${LARAVEL_FPM_PORT:-8084}:8080"
+    cpus: ${NGINX_CPUS:-2.0}
+    mem_limit: ${NGINX_MEM:-64m}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  app-laravel-octane-swoole:
+    profiles: ["laravel-octane-swoole", "laravel", "all"]
+    build:
+      context: .
+      dockerfile: docker/laravel-octane-swoole/Dockerfile
+    environment:
+      BENCHMARK_RUNTIME: laravel-octane-swoole
+      APP_ENV: production
+      APP_DEBUG: "false"
+      APP_KEY: ${LARAVEL_APP_KEY:-base64:Zm9vYmFyYmF6cXV4Zm9vYmFyYmF6cXV4MTIzNDU2Nzg=}
+      LOG_CHANNEL: stderr
+      SESSION_DRIVER: array
+      CACHE_STORE: array
+      QUEUE_CONNECTION: sync
+      APP_WORKERS: ${APP_WORKERS:-4}
+      APP_MAX_REQUESTS: ${APP_MAX_REQUESTS:-500}
+      EXTERNAL_IO_URL: ${EXTERNAL_IO_URL:-http://stub:8080/}
+      APP_TASK_WORKERS: ${APP_TASK_WORKERS:-1}
+    volumes:
+      - ./docker/shared/tuning/${PHP_TUNING:-baseline}.ini:/usr/local/etc/php/conf.d/zzz-tuning.ini:ro
+    ports:
+      - "${LARAVEL_OCTANE_SWOOLE_PORT:-8085}:8080"
+    cpus: ${APP_CPUS:-1.0}
+    mem_limit: ${APP_MEM:-512m}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app-laravel-octane-roadrunner:
+    profiles: ["laravel-octane-roadrunner", "laravel", "all"]
+    build:
+      context: .
+      dockerfile: docker/laravel-octane-roadrunner/Dockerfile
+    environment:
+      BENCHMARK_RUNTIME: laravel-octane-roadrunner
+      APP_ENV: production
+      APP_DEBUG: "false"
+      APP_KEY: ${LARAVEL_APP_KEY:-base64:Zm9vYmFyYmF6cXV4Zm9vYmFyYmF6cXV4MTIzNDU2Nzg=}
+      LOG_CHANNEL: stderr
+      SESSION_DRIVER: array
+      CACHE_STORE: array
+      QUEUE_CONNECTION: sync
+      APP_WORKERS: ${APP_WORKERS:-4}
+      APP_MAX_REQUESTS: ${APP_MAX_REQUESTS:-500}
+      EXTERNAL_IO_URL: ${EXTERNAL_IO_URL:-http://stub:8080/}
+    volumes:
+      - ./docker/shared/tuning/${PHP_TUNING:-baseline}.ini:/usr/local/etc/php/conf.d/zzz-tuning.ini:ro
+    ports:
+      - "${LARAVEL_OCTANE_ROADRUNNER_PORT:-8086}:8080"
+    cpus: ${APP_CPUS:-1.0}
+    mem_limit: ${APP_MEM:-512m}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # FrankenPHP. Both modes come from the SAME image and differ only in the
+  # mounted Caddyfile, which isolates "persistent worker" without changing the
+  # server underneath -- the only pair in the lab that can do that.
+  # ---------------------------------------------------------------------------
+
+  app-frankenphp:
+    profiles: ["frankenphp", "all"]
+    build:
+      context: .
+      dockerfile: docker/frankenphp/Dockerfile
+      args:
+        PHP_VERSION: ${PHP_VERSION:-8.3}
+    environment:
+      BENCHMARK_RUNTIME: frankenphp
+      APP_WORKERS: ${APP_WORKERS:-4}
+      APP_THREADS: ${APP_THREADS:-5}
+      APP_MAX_REQUESTS: ${APP_MAX_REQUESTS:-500}
+      EXTERNAL_IO_URL: ${EXTERNAL_IO_URL:-http://stub:8080/}
+    volumes:
+      - ./docker/frankenphp/Caddyfile.classic:/etc/frankenphp/Caddyfile:ro
+      - ./docker/shared/tuning/${PHP_TUNING:-baseline}.ini:/usr/local/etc/php/conf.d/zzz-tuning.ini:ro
+      - ./preload.php:/var/www/html/preload.php:ro
+    ports:
+      - "${FRANKENPHP_PORT:-8087}:8080"
+    cpus: ${APP_CPUS:-1.0}
+    mem_limit: ${APP_MEM:-512m}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app-frankenphp-worker:
+    profiles: ["frankenphp-worker", "all"]
+    build:
+      context: .
+      dockerfile: docker/frankenphp/Dockerfile
+      args:
+        PHP_VERSION: ${PHP_VERSION:-8.3}
+    environment:
+      BENCHMARK_RUNTIME: frankenphp-worker
+      APP_WORKERS: ${APP_WORKERS:-4}
+      APP_THREADS: ${APP_THREADS:-5}
+      APP_MAX_REQUESTS: ${APP_MAX_REQUESTS:-500}
+      EXTERNAL_IO_URL: ${EXTERNAL_IO_URL:-http://stub:8080/}
+    volumes:
+      - ./docker/frankenphp/Caddyfile.worker:/etc/frankenphp/Caddyfile:ro
+      - ./docker/shared/tuning/${PHP_TUNING:-baseline}.ini:/usr/local/etc/php/conf.d/zzz-tuning.ini:ro
+      - ./preload.php:/var/www/html/preload.php:ro
+    ports:
+      - "${FRANKENPHP_WORKER_PORT:-8088}:8080"
+    cpus: ${APP_CPUS:-1.0}
+    mem_limit: ${APP_MEM:-512m}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Dependencia simulada da rota external_io. Node, nao PHP: nunca pode ser o
+  # gargalo, e nao pode ser confundido com um dos runtimes sob teste. Orcamento
+  # generoso de proposito, pelo mesmo motivo que o k6 tem o dele.
+  stub:
+    profiles: ["fpm", "swoole", "roadrunner", "laravel-fpm", "laravel-octane-swoole",
+               "laravel-octane-roadrunner", "frankenphp", "frankenphp-worker", "laravel", "all"]
+    image: node:22-alpine
+    command: ["node", "/srv/server.js"]
+    volumes:
+      - ./docker/stub/server.js:/srv/server.js:ro
+    environment:
+      STUB_DELAY_MS: ${STUB_DELAY_MS:-10}
+    cpus: ${STUB_CPUS:-2.0}
+    mem_limit: ${STUB_MEM:-512m}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  k6:
+    profiles: ["bench"]
+    image: grafana/k6:latest
+    volumes:
+      - ./benchmarks/scripts:/scripts:ro
+      - ./benchmarks/results:/results
+      - ./routes.json:/routes.json:ro
+      - ./performance.json:/performance.json:ro
+    working_dir: /scripts
+    # The load generator gets an explicit budget of its own so it cannot grow
+    # without bound and starve the runtime it is measuring. It is deliberately
+    # larger than the app's budget: k6 must never be the bottleneck, or the
+    # reported RPS would describe the generator instead of the runtime. Watch
+    # for "Insufficient VUs" in the output — that is the signal it was.
+    cpus: ${K6_CPUS:-2.0}
+    mem_limit: ${K6_MEM:-1g}
+
+  # Dependency-free smoke test of the shared application layer. Uses plain
+  # volume mounts and the stock PHP image, so it needs no build and runs in
+  # seconds: docker compose --profile test run --rm test
+  test:
+    profiles: ["test"]
+    image: php:8.3-cli-alpine
+    volumes:
+      - ./app:/var/www/html/app:ro
+      - ./tests:/var/www/html/tests:ro
+      - ./routes.json:/var/www/html/routes.json:ro
+      - ./performance.json:/var/www/html/performance.json:ro
+    working_dir: /var/www/html
+    command: ["php", "tests/smoke-test.php"]

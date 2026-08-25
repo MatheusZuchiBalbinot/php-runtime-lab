@@ -1,0 +1,37 @@
+# FrankenPHP in classic mode: PHP is bootstrapped per request, like PHP-FPM,
+# but served by Caddy instead of nginx + a separate FPM pool.
+{
+	# No TLS in the lab; every runtime is measured over plain HTTP.
+	auto_https off
+	admin off
+
+	frankenphp {
+		# The shared worker budget, so this runtime serves as many requests
+		# concurrently as every other one.
+		#
+		# Classic mode has no persistent workers: a request occupies a thread
+		# for its duration, so the thread count *is* the concurrency. Left
+		# unset, FrankenPHP picks its own default from the CPU it detects, and
+		# `cpus: 1.0` is a CFS quota rather than a cpuset — so it lands well
+		# below the budget and the runtime measures slower than its model is.
+		num_threads {$APP_WORKERS:4}
+	}
+
+	servers {
+		# Pinned to HTTP/1.1 deliberately. Caddy negotiates HTTP/2 by default
+		# while nginx and the other runtimes answer k6 over HTTP/1.1, and
+		# throughput compared across different protocols measures the
+		# protocol, not the runtime.
+		protocols h1
+	}
+}
+
+:8080 {
+	root * /var/www/html/app/public
+
+	# Every path is routed through the shared entrypoint, matching how the
+	# other runtimes dispatch.
+	rewrite * /index.php
+
+	php_server
+}
