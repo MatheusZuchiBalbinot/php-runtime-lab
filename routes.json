@@ -1,0 +1,9 @@
+[
+  { "path": "/", "label": "health" },
+  { "path": "/bench/noop", "label": "noop" },
+  { "path": "/bench/cpu", "label": "cpu" },
+  { "path": "/bench/blocking-wait", "label": "blocking_wait" },
+  { "path": "/bench/external-io", "label": "external_io", "requires_dependency": true },
+  { "path": "/bench/json", "label": "json" },
+  { "path": "/bench/memory", "label": "memory" }
+]

@@ -1,0 +1,72 @@
+{
+  "resources": {
+    "_comment": "Worker count is derived from the CPU budget by one formula applied to every runtime: max(1, ceil(APP_CPUS * workers_per_cpu)). Equal allowance is the point — whatever difference the benchmark then shows belongs to the concurrency model, not to a number someone picked per runtime. Being a function of APP_CPUS keeps the proportion when the budget varies.",
+    "workers_per_cpu": 4,
+    "_max_requests_per_worker": "How many requests a worker serves before being recycled; 0 disables it. Set to 0 because recycling is leak insurance rather than a performance feature -- PHP-FPM's own config introduces it as a way to work around memory leaks in third-party libraries -- and because three of the four servers here default to never recycling. Only Octane defaults to 500, and this lab had been imposing Octane's default on the other seven.",
+    "_max_requests_per_worker_cost": "The cost of that default was not equal, which is why it changed. 'Recycle every 500 requests' sounds identical for every runtime and is not: at 9,826 rps across 4 workers, Swoole recycled about five times per second per worker, and each recycle reaped the dozens of coroutines that worker had in flight. A process-per-request runtime has exactly one request in flight and simply finishes it. The policy was equal in name while penalising whichever runtime was fastest and most concurrent -- the very property this lab exists to measure.",
+    "_max_requests_per_worker_safety": "Nothing here leaks: the handlers keep no state between requests, and request_memory_retained_bytes in every response is the instrument that proves it rather than assuming it.",
+    "max_requests_per_worker": 0,
+    "_idle_memory_warn_ratio": "Fraction of the memory budget a runtime may occupy while idle before the sweep warns. Octane once sat at 89% before any load arrived.",
+    "idle_memory_warn_ratio": 0.35,
+    "_load_generator_multiplier": "How much bigger the load generator's budget is than the application's. The generator must never be the constraint, or the reported throughput describes k6 rather than the runtime — and being a multiple of APP_CPUS rather than a fixed number keeps that true when the application budget is varied. Verified at 2x by re-measuring the fastest route with the generator's budget doubled: 11,095 rps against 11,068, identical inside the noise, so k6 was not the limit even then. Then measured again once the generator's own utilisation was finally being captured: across all 48 cells of a full matrix its peak was 178.7% -- 1.8 cores -- so a 5x multiplier was never exercised. Lowering it on that basis would have been a mistake, and the evidence for why is the strongest single result in this file: at 2x the generator ran at 89% of its own quota and was being throttled, and CFS throttling of the generator surfaces as apparent request latency. Every runtime in that run showed a tail pinned near 18s -- the same value for FPM, Swoole, RoadRunner and FrankenPHP alike, which is exactly the signature of an artefact in the one component they share. Raising the multiplier to 5x removed it: six of eight runtimes dropped to a sub-2s maximum. The margin is not waste, it is what keeps throttling out of the measurement.",
+    "load_generator_multiplier": 5
+  },
+  "load": {
+    "_measure_seconds": "Length of the measured window per sample. This is the main cost lever of a full run: 60s across 8 runtimes and 6 routes takes about 3 hours, 30s about half that. 60 is chosen because it buys agreement between samples — the same routes measured over a 3s window disagreed by up to 7.9%, while at 60s the spread fell under 2.3%, which is what makes a difference between two runtimes readable as signal.",
+    "measure_seconds": 60,
+    "target_rps": 50,
+    "_warmup_seconds": "Traffic sent before measurement starts, and discarded. Without it the cold cost of the first requests lands inside the sample, and it lands unevenly: a persistent worker pays compilation and linking once and then runs warm, while FPM never warms — so measuring cold understates exactly the advantage this lab exists to quantify. The JIT needs this too, since it only compiles paths it has seen run hot.",
+    "warmup_seconds": 5,
+    "_graceful_stop_seconds": "Grace given to requests still in flight when a window ends. Kept short because under deliberate saturation there are always requests in flight, and waiting longer only extends every one of the 144 measurements in a full run.",
+    "graceful_stop_seconds": 2,
+    "_cooldown_seconds": "Idle gap between samples, so one measurement's tail does not land inside the next one's window.",
+    "cooldown_seconds": 1,
+    "latency_budget_p95_ms": 200,
+    "error_rate_budget": 0.01,
+    "pre_allocated_vus": 50,
+    "max_vus": 200,
+    "max_vus_ceiling": 4000
+  },
+  "overload": {
+    "_comment": "The saturation profile, and the only one a sweep uses: how many requests per second the server can DRAIN at its limit, with no latency budget to satisfy. Closed loop (constant-vus, no pacing) — each virtual user sends, waits for the response, and sends again, so throughput limits itself to what the server can absorb. An open loop at this point would stack up a queue and then measure the queue rather than the server: observed here as a 12 second p99 with FPM overloaded. The window comes from load.measure_seconds; this section only sizes the virtual-user pool.",
+    "vus": 200
+  },
+  "presets": {
+    "_comment": "Three sizes of the same measurement, so the cost of a run is a choice rather than an edit. They trade time for agreement between samples: one sample cannot tell a real ceiling from scheduler noise at all, and a short window disagrees with itself — the same routes measured over a 3s window scattered by up to 7.9%, against under 2.3% at 60s. Small is for seeing whether a change moved anything; large is for a number worth publishing. Flags are keyed by name, so `_measure_seconds` and `_samples_per_route` are read as `<preset>_measure_seconds`.",
+    "_cost": "Roughly 48 route-measurements per sample across the eight runtimes, each costing its window plus ~11s of warmup, drain and container start: small ~35 min, medium ~90 min, large ~2h50.",
+    "small_measure_seconds": 30,
+    "small_samples_per_route": 1,
+    "medium_measure_seconds": 45,
+    "medium_samples_per_route": 2,
+    "large_measure_seconds": 60,
+    "large_samples_per_route": 3
+  },
+  "sweep": {
+    "_comment": "Each route is measured by saturating it in a closed loop, repeated a few times. The binary search that used to live here is gone, and so is refinement_steps, which configured it.",
+    "_samples_per_route": "How many times each route is measured. A single sample gives no way to tell a real ceiling from scheduler noise: the reported figure is the median, and the spread between samples is reported alongside it so a difference between two runtimes can be judged against the noise. Set to 1 for a quick exploratory run.",
+    "samples_per_route": 3
+  },
+  "cpu": {
+    "_comment": "Work executed by the PHP virtual machine itself: integer arithmetic and bitwise operations, with no call into a C extension anywhere in the loop. That constraint is what the route is for. It previously ran a sha256 loop, which spent its time inside OpenSSL rather than inside PHP, and the cost was that the tuning axis could not register — baseline measured 1192 rps against JIT's 1156, because a JIT that compiles PHP opcodes had almost none to compile. The same blindness applied to comparing PHP versions.",
+    "_iterations": "Sizes the route's work, and it is the only knob that does. The previous configuration also exposed hash_seed_length, which claimed to size the input but did not: after the first round the value being hashed was a 64-character digest, so 499 of the 500 rounds ignored the setting entirely. Calibrated so the route costs roughly what the old one did, keeping it comparable against the other routes rather than against earlier runs.",
+    "iterations": 25000
+  },
+  "blocking_wait": {
+    "_comment": "A sleep, not I/O: no syscall on a descriptor, no kernel wait for data. It measures the concurrency model's ceiling, since a coroutine runtime yields here while a process-per-request runtime blocks a whole worker.",
+    "wait_microseconds": 10000
+  },
+  "external_io": {
+    "_comment": "Real I/O against the dependency stub: a socket, a syscall, a genuine kernel wait. The stub's own delay is set by STUB_DELAY_MS and defaults to the same value as blocking_wait, making the two a controlled pair — identical wait, one simulated and one real. Whether a runtime beats workers-divided-by-latency here depends on its driver yielding, not on its worker model.",
+    "timeout_milliseconds": 5000
+  },
+  "json": {
+    "payload_record_count": 200,
+    "encoded_hash_preview_length": 16
+  },
+  "memory": {
+    "_comment": "Measures memory BANDWIDTH — the cost of allocating and touching memory — not capacity. Capacity cannot be made the binding constraint here: with a fixed worker count only that many requests are ever in flight, so reaching a 512 MiB budget would need ~128 MiB per request, and the cost of writing that much collapses throughput long before the budget is touched. Measured directly: at 16 MiB a request took ~10 ms and the route saturated below 80 rps, under the sweep's lowest rung. Capacity shows up instead as each runtime's baseline footprint, reported as idle memory.",
+    "_sizing": "Calibrated against a 400 rps target: 1 MiB gave p95 0.3 ms (too cheap to register), 2 MiB gave 2.1 ms, 4 MiB already collapsed to 260 rps and a 2.8 s p95. The cliff is sharp, so 2 MiB sits deliberately below it.",
+    "retained_mebibytes": 2,
+    "churn_cycles": 10
+  }
+}
