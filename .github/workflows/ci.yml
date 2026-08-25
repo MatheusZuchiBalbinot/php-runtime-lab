@@ -82,10 +82,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # `--wait` is load-bearing, not decoration. `up -d` returns as soon as the
+      # containers have been created, and for a persistent worker that is long
+      # before it serves anything: Octane and FrankenPHP boot the application
+      # first. Without it the check below raced the boot, curl hit a closed
+      # port, and the job failed on whichever runtime was slowest to start
+      # rather than on anything actually wrong with it.
+      #
+      # Every service in the profile declares a healthcheck, and for the two
+      # FPM pairs it is an HTTP GET through nginx to the FPM pool behind it —
+      # so a `--wait` that returns means each public surface has already
+      # answered a request. The explicit timeout keeps a runtime that never
+      # comes up from hanging the job until the runner's own limit.
       - name: Start every runtime
         run: |
           cp .env.example .env
-          docker compose --profile all up -d --build
+          docker compose --profile all up -d --build --wait --wait-timeout 300
 
       # Verifies wiring, not performance: each runtime must answer every route
       # declared in routes.json, and answer 404 for anything else. This is what
@@ -95,26 +107,62 @@ jobs:
       - name: Check every route on every runtime
         run: |
           set -eu
+
+          # `|| true` because this step reports every broken route rather than
+          # stopping at the first: curl exits non-zero when it cannot connect
+          # at all, and under `set -e` that killed the step before it could
+          # print which runtime and path were unreachable. The write-out is
+          # still emitted on a failed connection, as 000.
+          http_status() {
+            curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$1" || true
+          }
+
+          # Read once, and tolerant of whitespace, so reformatting routes.json
+          # cannot silently reduce this job to checking nothing — an empty
+          # path list would pass every runtime.
+          routePaths="$(grep -oE '"path"[[:space:]]*:[[:space:]]*"[^"]+"' routes.json |
+            sed -E 's/.*"path"[[:space:]]*:[[:space:]]*"//; s/"$//')"
+
+          if [ -z "$routePaths" ]; then
+            echo "No routes found in routes.json — nothing would be checked."
+            exit 1
+          fi
+
           failed=0
           while IFS='=' read -r runtime service; do
             case "$runtime" in ''|\#*) continue ;; esac
             # Entries carry taxonomy fields after the service name.
             service="${service%%|*}"
+
             port="$(docker compose --profile all port "$service" 8080 | tail -1 | sed 's/.*://')"
-            for path in $(grep -oE '"path": "[^"]+"' routes.json | sed 's/.*"path": "//;s/"//'); do
-              status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "http://localhost:${port}${path}")"
+            if [ -z "$port" ]; then
+              echo "FAIL ${runtime} service ${service} published no host port for 8080"
+              failed=1
+              continue
+            fi
+
+            echo "--- ${runtime} (${service}) on port ${port}"
+            for path in $routePaths; do
+              status="$(http_status "http://localhost:${port}${path}")"
               if [ "$status" != "200" ]; then
                 echo "FAIL ${runtime} ${path} -> ${status}"
                 failed=1
               fi
             done
-            status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "http://localhost:${port}/does-not-exist")"
+            status="$(http_status "http://localhost:${port}/does-not-exist")"
             if [ "$status" != "404" ]; then
               echo "FAIL ${runtime} unknown path -> ${status} (expected 404)"
               failed=1
             fi
           done < benchmarks/runtimes.conf
           exit "$failed"
+
+      # A runtime that never came up leaves nothing behind but a status of 000,
+      # which says only that nobody answered. Its logs say why, and they are
+      # gone the moment the teardown below runs.
+      - name: Runtime logs
+        if: failure()
+        run: docker compose --profile all logs --no-color --tail=200
 
       - name: Tear down
         if: always()
